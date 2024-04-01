@@ -2,6 +2,8 @@ import os
 
 IMPORT_LOCAL = os.environ.get('IMPORT_LOCAL', 'false') == 'true'
 MAX_SIZE = int(os.environ.get('MAX_SIZE', '3'))
+MAX_LEN = int(os.environ.get('MAX_LEN', '1500'))
+TOP_K = int(os.environ.get('TOP_K', '5'))
 MODEL = os.environ.get('MODEL', 'NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO')
 
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -11,7 +13,12 @@ from playwright.async_api import async_playwright
 from collections import defaultdict
 from PIL import Image
 from huggingface_hub import InferenceClient
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModel
+from tree_sitter_languages import get_language, get_parser
+from tree_sitter import Node
+from rank_bm25 import BM25Okapi
+import numpy as np
+import re
 import io
 import json
 import playwright
@@ -23,6 +30,69 @@ import concurrent.futures
 client = InferenceClient(model=f'https://api-inference.huggingface.co/models/{MODEL}')
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 special_tokens = set(tokenizer.all_special_tokens)
+
+language = get_language('html')
+parser = get_parser('html')
+
+
+def chunk_node(node: Node, text: str, MAX_CHARS: int = 1500):
+    chunks = []
+    current_chunk = ""
+    for child in node.children:
+        if child.end_byte - child.start_byte > MAX_CHARS:
+            chunks.append(current_chunk)
+            current_chunk = ""
+            chunks.extend(chunk_node(child, text, MAX_CHARS))
+        elif child.end_byte - child.start_byte + len(current_chunk) > MAX_CHARS:
+            chunks.append(current_chunk)
+            current_chunk = text[child.start_byte: child.end_byte]
+        else:
+            current_chunk += text[child.start_byte: child.end_byte]
+    chunks.append(current_chunk)
+
+    return chunks
+
+
+def chunking(text, max_len=1500, overlap=200):
+    tree = parser.parse(bytes(text, 'utf-8'))
+    node = tree.root_node
+
+    chunks = []
+    current_chunk = ''
+    for child in node.children:
+        if child.end_byte - child.start_byte > max_len:
+            chunks.append(current_chunk)
+            current_chunk = ''
+            chunks.extend(chunk_node(child, text, max_len))
+        elif child.end_byte - child.start_byte + len(current_chunk) > max_len:
+            chunks.append(current_chunk)
+            current_chunk = text[child.start_byte: child.end_byte]
+        else:
+            current_chunk += text[child.start_byte: child.end_byte]
+
+    chunks.append(current_chunk)
+    chunks = [c.strip() for c in chunks]
+    chunks = [c for c in chunks if len(c) > 20]
+    return chunks
+
+
+class Embedding:
+    model = None
+    tokenizer = None
+
+    def initialize(self):
+        if self.model is None:
+            self.model = AutoModel.from_pretrained(MODEL_EMBEDDING)
+            self.tokenizer = AutoTokenizer.from_pretrained(MODEL_EMBEDDING)
+
+    def encode(self, strings):
+        self.initialize()
+        encoded_input = self.tokenizer(strings, padding=True, truncation=True, return_tensors='pt')
+        with torch.no_grad():
+            model_output = self.model(**encoded_input)
+            sentence_embeddings = model_output[0][:, 0]
+        sentence_embeddings = torch.nn.functional.normalize(sentence_embeddings, p=2, dim=1)
+        return sentence_embeddings.numpy()
 
 
 class ConnectionManager:
@@ -81,6 +151,7 @@ class ConnectionManager:
 
 
 manager = ConnectionManager(max_size=MAX_SIZE)
+embedding = Embedding()
 
 
 class Command(BaseModel):
@@ -90,6 +161,7 @@ class Command(BaseModel):
 
 app = FastAPI()
 
+# https://github.com/lavague-ai/LaVague/blob/main/src/lavague/prompts.py
 system_prompt = """
 Your goal is to write Async Playwright code to answer queries.
 
@@ -182,7 +254,14 @@ await link2.click()
 
 ---
 
+HTML:
+<!DOCTYPE html>
+<html lang="en">
+{context_str}
+</html>
+
 Query: {query_str}
+
 Completion:
 ```python
 # Let's proceed step by step.
@@ -210,7 +289,7 @@ async def video_streamer(client_id):
             b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
         )
 
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.01)
 
 
 async def run_command(command, client_id):
@@ -222,35 +301,47 @@ async def run_command(command, client_id):
         manager.status[client_id].append('<b>hey im running something, please wait</b>\n')
     else:
         manager.executing[client_id] = True
-        gen_input = system_prompt.format(query_str=command)
-
-        r = client.text_generation(
-            prompt=gen_input,
-            max_new_tokens=1024,
-            temperature=0.9,
-            do_sample=True,
-            top_p=0.95,
-            top_k=50,
-            stream=True,
-            stop_sequences=['```']
-        )
-        all_texts = []
-        for r_ in r:
-            if r_ in special_tokens:
-                continue
-            manager.status[client_id].append(r_)
-            all_texts.append(r_)
-
-        all_texts = ''.join(all_texts).replace('```', '')
-        all_texts = all_texts.replace(
-            'page.', f"manager.page['{client_id}'].")
+        html = await manager.page[client_id].content()
+        chunks = chunking(text=html, max_len=MAX_LEN)
+        tokenized_corpus = [doc.split(' ') for doc in chunks]
+        bm25 = BM25Okapi(tokenized_corpus)
+        tokenized_query = command.split(' ')
+        doc_scores = bm25.get_scores(tokenized_query)
+        top_indices = np.argsort(doc_scores)[-TOP_K:]
+        top_chunks = [chunks[i] for i in top_indices]
+        html = '\n'.join(top_chunks[::-1])
+        print(html)
+        gen_input = system_prompt.format(context_str=html, query_str=command)
 
         try:
+
+            r = client.text_generation(
+                prompt=gen_input,
+                max_new_tokens=1024,
+                temperature=0.9,
+                do_sample=True,
+                top_p=0.95,
+                top_k=50,
+                stream=True,
+                stop_sequences=['```']
+            )
+            all_texts = []
+            for r_ in r:
+                if r_ in special_tokens:
+                    continue
+                manager.status[client_id].append(r_)
+                all_texts.append(r_)
+
+            all_texts = ''.join(all_texts).replace('```', '')
+            all_texts = all_texts.replace(
+                'page.', f"manager.page['{client_id}'].")
+
             exec(
                 f'async def __ex(): ' +
                 ''.join(f'\n {l}' for l in all_texts.split('\n'))
             )
             await locals()['__ex']()
+
         except Exception as e:
             e = f'error: {str(e)}'
             manager.status[client_id].append(e)
