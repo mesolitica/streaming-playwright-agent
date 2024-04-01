@@ -2,7 +2,7 @@
 
 Super simple streaming Playwright agent using websocker including queue.
 
-<img src="image/printscreen.png" width="50%">
+<img src="image/printscreen.png" width="100%">
 
 **Frontend is my passion**.
 
