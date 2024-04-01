@@ -1,6 +1,6 @@
 # streaming-playwright-agent
 
-Super simple streaming Playwright agent using websocker including queue.
+Super simple website application streaming Playwright agent using websocket that support multi-users including queue.
 
 <img src="image/printscreen.png" width="100%">
 
@@ -28,5 +28,6 @@ docker-compose up --build
 
 ## how to make it better?
 
-1. Use redis or something like that for centralized management.
-2. Improve the prompt.
+1. Use redis or something like that for centralized management, so you can scale more than 1 replica.
+2. Create another Playwright manager to keep check the ID is still alive, if not delete the browser object, so you can scale more than 1 replica.
+3. Improve the prompt.
