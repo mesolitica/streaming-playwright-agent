@@ -1,24 +1,28 @@
-import sys
 import os
 
 IMPORT_LOCAL = os.environ.get('IMPORT_LOCAL', 'false') == 'true'
 MAX_SIZE = int(os.environ.get('MAX_SIZE', '3'))
-
-if IMPORT_LOCAL:
-    SOURCE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__name__)))
-    sys.path.insert(0, SOURCE_DIR)
+MODEL = os.environ.get('MODEL', 'NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO')
 
 from fastapi.responses import HTMLResponse, StreamingResponse
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 from collections import defaultdict
 from PIL import Image
+from huggingface_hub import InferenceClient
+from transformers import AutoTokenizer
 import io
 import json
 import playwright
 import asyncio
-import time
+import threading
+import concurrent.futures
+
+
+client = InferenceClient(model=f'https://api-inference.huggingface.co/models/{MODEL}')
+tokenizer = AutoTokenizer.from_pretrained(MODEL)
+special_tokens = set(tokenizer.all_special_tokens)
 
 
 class ConnectionManager:
@@ -66,7 +70,13 @@ class ConnectionManager:
         self.done[client_id] = True
         print(f'done initialize {client_id}')
 
-    async def send_personal_message(self, message: dict, websocket: WebSocket):
+    async def send_personal_message(self, message: dict, websocket: WebSocket, client_id):
+        message['text'] = message['text'].replace('\n', '<br>')
+        if self.done.get(client_id, False):
+            url = self.page[client_id].url
+        else:
+            url = None
+        message['url'] = url
         await websocket.send_text(json.dumps(message))
 
 
@@ -81,7 +91,101 @@ class Command(BaseModel):
 app = FastAPI()
 
 system_prompt = """
-you are Async Playwright Python agent, you always response with Python code only, assumed `browser` dan `page` already initialized, you just need to continue using `page` variable, and no need to close.
+Your goal is to write Async Playwright code to answer queries.
+
+Your answer must be a Python markdown only.
+You can have access to external websites and libraries.
+
+You can assume the following code has been executed:
+```python
+from playwright.async_api import async_playwright
+playwright = await async_playwright().start()
+browser = await playwright.chromium.launch()
+page = await browser.new_page()
+```
+
+---
+
+HTML:
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Mock Search Page</title>
+</head>
+<body>
+    <h1>Search Page Example</h1>
+    <input id="searchBar" type="text" placeholder="Type here to search...">
+    <button id="searchButton">Search</button>
+    <script>
+        document.getElementById('searchButton').onclick = function() {{
+            var searchText = document.getElementById('searchBar').value;
+            alert("Searching for: " + searchText);
+        }};
+    </script>
+</body>
+</html>
+
+Query: Click on the search bar 'Type here to search...', type 'selenium', and press the 'Enter' key
+
+Completion:
+```python
+# Let's proceed step by step.
+# First we need to identify the component first, then we can click on it.
+
+# Based on the HTML, the link can be uniquely identified using the ID "searchBar"
+# Let's use this ID with Selenium to identify the link
+search_bar = await page.get_by_id("searchBar")
+await search_bar.click()
+
+# Now we can type the asked input
+await search_bar.fill("selenium")
+
+# Press the 'Enter' key
+await search_bar.press("Enter")
+```
+
+---
+
+HTML:
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Mock Page for Selenium</title>
+</head>
+<body>
+    <h1>Welcome to the Mock Page</h1>
+    <div id="links">
+        <a href="#link1" id="link1">Link 1</a>
+        <br>
+        <a href="#link2" class="link">Link 2</a>
+        <br>
+    </div>
+</body>
+</html>
+
+Query: Click on the title Link 1 and then click on the title Link 2
+
+Completion:
+```python
+# Let's proceed step by step.
+# First we need to identify the first component, then we can click on it. Then we can identify the second component and click on it.
+
+# Click on the link with text "Link 1"
+link1 = await page.get_by_text("Link 1")
+await link1.click()
+
+# Click on the link with text "Link 2"
+link2 = await page.get_by_text("Link 2")
+await link2.click()
+```
+
+---
+
+Query: {query_str}
+Completion:
+```python
+# Let's proceed step by step.
 """
 
 
@@ -109,6 +213,51 @@ async def video_streamer(client_id):
         await asyncio.sleep(0.05)
 
 
+async def run_command(command, client_id):
+    if not manager.done.get(client_id, False):
+        manager.status[client_id].append('please wait im initializing')
+        return
+
+    if manager.executing.get(client_id, False):
+        manager.status[client_id].append('<b>hey im running something, please wait</b>\n')
+    else:
+        manager.executing[client_id] = True
+        gen_input = system_prompt.format(query_str=command)
+
+        r = client.text_generation(
+            prompt=gen_input,
+            max_new_tokens=1024,
+            temperature=0.9,
+            do_sample=True,
+            top_p=0.95,
+            top_k=50,
+            stream=True,
+            stop_sequences=['```']
+        )
+        all_texts = []
+        for r_ in r:
+            if r_ in special_tokens:
+                continue
+            manager.status[client_id].append(r_)
+            all_texts.append(r_)
+
+        all_texts = ''.join(all_texts).replace('```', '')
+        all_texts = all_texts.replace(
+            'page.', f"manager.page['{client_id}'].")
+
+        try:
+            exec(
+                f'async def __ex(): ' +
+                ''.join(f'\n {l}' for l in all_texts.split('\n'))
+            )
+            await locals()['__ex']()
+        except Exception as e:
+            e = f'error: {str(e)}'
+            manager.status[client_id].append(e)
+
+        manager.executing[client_id] = False
+
+
 @app.get('/')
 async def get():
     f = 'index.html'
@@ -120,8 +269,9 @@ async def get():
 
 
 @app.post('/command')
-async def get_command(command: Command):
-    print(command)
+async def get_command(command: Command, background_tasks: BackgroundTasks = None):
+    command = command.dict()
+    background_tasks.add_task(run_command, **command)
 
 
 @app.get('/queue')
@@ -131,7 +281,6 @@ async def get():
 
 @app.get('/video_feed')
 async def video_feed(client_id: str):
-    print(client_id)
     return StreamingResponse(
         video_streamer(client_id=client_id),
         media_type='multipart/x-mixed-replace; boundary=frame'
@@ -148,7 +297,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                 d = {
                     'flush': True,
                     'text': f'your current queue is {(manager.queue[client_id] - manager.max_size) + 1}'}
-                await manager.send_personal_message(d, websocket)
+                await manager.send_personal_message(d, websocket, client_id)
             else:
                 if client_id in manager.done:
                     if len(manager.status[client_id]):
@@ -157,19 +306,19 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                             'flush': False,
                             'text': t
                         }
-                        await manager.send_personal_message(d, websocket)
+                        await manager.send_personal_message(d, websocket, client_id)
 
                 else:
                     d = {
                         'flush': False,
-                        'text': 'initializing browser ..'
+                        'text': 'initializing browser ..\n'
                     }
-                    await manager.send_personal_message(d, websocket)
+                    await manager.send_personal_message(d, websocket, client_id)
                     await manager.initialize(client_id)
-                    manager.status[client_id].append('done initialized browser')
-                    manager.status[client_id].append('give me something')
+                    manager.status[client_id].append('done initialized browser\n')
+                    manager.status[client_id].append('give me something\n\n')
 
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.001)
             await websocket.send_text('')
 
     except Exception as e:

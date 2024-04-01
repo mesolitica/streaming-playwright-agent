@@ -4,6 +4,8 @@ Super simple website application streaming Playwright agent using websocket that
 
 <img src="image/printscreen.png" width="100%">
 
+<img src="image/readthedocs.png" width="100%">
+
 **Frontend is my passion**.
 
 ## how-to

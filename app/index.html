@@ -10,8 +10,11 @@
 
 <body>
   <div style="overflow: auto">
+    URL: <span id="url"></span>
+    <br>
     <img style="float: left; margin-right: 10px;" width="60%">
-    Your ID: <span id="ws-id"></span>, ask me to do something: <button>Enter</button><br>
+    Your ID: <span id="ws-id"></span>, ask me to do something: <button id="submit">Enter</button><button
+      id="clear">Clear</button><br>
     <textarea id="askme" rows="4" style="width: 30%">go to google.com</textarea><br>
     Text: <br>
     <div id="text"></div>
@@ -21,7 +24,7 @@
 </body>
 
 <script type="text/javascript">
-  var client_id = Date.now()
+  var client_id = Date.now().toString();
   const isLocalhost = location.protocol !== "https:"
   const protocol = isLocalhost ? 'ws://' : 'wss://';
   const domain = window.location.host;
@@ -32,15 +35,47 @@
     console.log('opened');
   };
   ws.onmessage = function (event) {
-    data = JSON.parse(event.data);
-    console.log(data);
-    if (data.flush) {
-      document.getElementById('text').innerHTML = data.text;
-    } else {
-      document.getElementById('text').innerHTML += data.text + '<br>';
-    }
+    try {
+      data = JSON.parse(event.data);
+      console.log(data);
+      if (data.flush) {
+        document.getElementById('text').innerHTML = data.text;
 
+      } else {
+        document.getElementById('text').innerHTML += data.text;
+      }
+      document.getElementById('url').innerHTML = data.url;
+    }
+    catch (err) {
+    }
   };
+
+  const submitButton = document.getElementById('submit');
+  const clearButton = document.getElementById('clear');
+  const textArea = document.getElementById('askme');
+  const textDiv = document.getElementById('text');
+
+  submitButton.addEventListener('click', () => {
+    const data = { command: textArea.value, client_id: client_id };
+
+    fetch('/command', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(data)
+    })
+      .then(response => response.text())
+      .catch(error => {
+        console.error('Error:', error);
+      });
+  });
+
+  clearButton.addEventListener('click', () => {
+    textDiv.textContent = '';
+  });
+
+
 </script>
 
 </html>
