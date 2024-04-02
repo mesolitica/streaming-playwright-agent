@@ -6,6 +6,8 @@ Super simple website application streaming Playwright agent using websocket that
 
 <img src="image/readthedocs.png" width="100%">
 
+<video src="image/google-search.mov" width="100%">
+
 **Frontend is my passion**.
 
 ## how-to
