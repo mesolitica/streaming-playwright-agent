@@ -19,7 +19,7 @@ pip3 install -r requirements.txt
 2. Run FastAPI,
 
 ```bash
-MAX_SIZE=3 uvicorn app.main:app --reload --host 0.0.0.0
+IMPORT_LOCAL=true MAX_SIZE=3 uvicorn app.main:app --reload --host 0.0.0.0
 ```
 
 Or use docker,
@@ -33,9 +33,12 @@ docker-compose up --build
 ```python
 IMPORT_LOCAL = os.environ.get('IMPORT_LOCAL', 'false') == 'true'
 MAX_SIZE = int(os.environ.get('MAX_SIZE', '3'))
-MAX_LEN = int(os.environ.get('MAX_LEN', '1500'))
-TOP_K = int(os.environ.get('TOP_K', '5'))
+MAX_LEN = int(os.environ.get('MAX_LEN', '512'))
+TOP_K_BM25 = int(os.environ.get('TOP_K_BM25', '10'))
 MODEL = os.environ.get('MODEL', 'NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO')
+ENABLE_EMBEDDING = os.environ.get('ENABLE_EMBEDDING', 'false') == 'true'
+MODEL_EMBEDDING = os.environ.get('MODEL_EMBEDDING', 'thenlper/gte-small')
+TOP_K_EMBEDDING = int(os.environ.get('TOP_K', '5'))
 ```
 
 ## how to make it better?

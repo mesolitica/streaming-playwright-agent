@@ -8,6 +8,8 @@ RUN playwright install
 
 RUN pip3 install Pillow
 
+RUN pip3 install torch --index-url https://download.pytorch.org/whl/cpu
+
 COPY ./app /app
 
 ENV PORT=9091

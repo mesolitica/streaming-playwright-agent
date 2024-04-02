@@ -2,3 +2,5 @@ app/__pycache__
 .ipynb_checkpoints
 *.ipynb
 huggingface
+a.png
+test.html
